@@ -1,0 +1,22 @@
+# Ignore all CSV files inside data folder
+data/*.csv
+
+# Or to ignore all Excel/CSV files
+data/*.csv
+data/*.xls
+data/*.xlsx
+
+
+# Spark checkpoints & state
+spark/checkpoints/
+spark/**/state/
+*.crc
+*.tmp
+
+# Logs
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.pyc

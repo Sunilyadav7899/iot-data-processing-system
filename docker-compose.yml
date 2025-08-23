@@ -1,0 +1,292 @@
+version: '3.8'
+
+services:
+  # Zookeeper - Required for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: "-Xms512M -Xmx1G"  
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 1g
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+      - iot-network
+  kafka-init:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      kafka-topics --create --if-not-exists --topic iot-temperature \
+        --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 &&
+      kafka-topics --create --if-not-exists --topic iot-window-events \
+        --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1
+      "
+
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_HEAP_OPTS: "-Xms1G -Xmx2G"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hadoop Namenode
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    environment:
+      - CLUSTER_NAME=hadoop-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - CORE_CONF_hadoop_proxyuser_hue_hosts=*
+      - CORE_CONF_hadoop_proxyuser_hue_groups=*
+      - CORE_CONF_io_compression_codecs=org.apache.hadoop.io.compress.SnappyCodec
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_nameservices=hdfscluster
+    volumes:
+      - namenode-data:/hadoop/dfs/name
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hadoop Datanode
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    depends_on:
+      - namenode
+    ports:
+      - "9864:9864"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      CORE_CONF_hadoop_http_staticuser_user: root
+      CORE_CONF_hadoop_proxyuser_hue_hosts: "*"
+      CORE_CONF_hadoop_proxyuser_hue_groups: "*"
+      CORE_CONF_io_compression_codecs: org.apache.hadoop.io.compress.SnappyCodec
+      HDFS_CONF_dfs_webhdfs_enabled: true
+      HDFS_CONF_dfs_permissions_enabled: false
+    volumes:
+      - datanode-data:/hadoop/dfs/data
+    networks:
+      - iot-network
+
+  # Spark Master
+  spark-master:
+    image: bitnami/spark:3.4.1
+    container_name: spark-master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes:
+      - ./spark:/app
+      - spark-logs:/opt/bitnami/spark/logs
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080 | grep -q 'Spark Master'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Spark Worker
+  spark-worker:
+    image: bitnami/spark:3.4.1
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes:
+      - ./spark:/app
+      - spark-logs:/opt/bitnami/spark/logs
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081 | grep -q 'Spark Worker'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: iot_data
+      POSTGRES_USER: iot_user
+      POSTGRES_PASSWORD: iot_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iot_user -d iot_data"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Grafana for Visualization
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Kafka Producer for IoT Data
+  kafka-producer:
+    build:
+      context: ./kafka
+      dockerfile: Dockerfile
+    container_name: kafka-producer
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DATA_PATH: /app/data
+    volumes:
+      - ./data:/app/data
+      - ./kafka/producer:/app
+    networks:
+      - iot-network
+    restart: unless-stopped
+
+  # Spark Streaming Job
+  spark-streaming:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: spark-streaming
+    depends_on:
+      - spark-master
+      - kafka
+      - postgres
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: iot_data
+      POSTGRES_USER: iot_user
+      POSTGRES_PASSWORD: iot_password
+      HDFS_NAMENODE: hdfs://namenode:9000
+    volumes:
+      - ./spark/streaming:/app/streaming    # Python processors
+      - ./spark/jobs:/app/jobs
+    networks:
+      - iot-network
+    restart: unless-stopped
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  iot-network:
+    driver: bridge
+
+volumes:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  namenode-data:
+  datanode-data:
+  postgres-data:
+  grafana-data:
+  spark-logs:
+  redis-data:
