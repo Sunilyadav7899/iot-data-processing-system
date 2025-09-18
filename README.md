@@ -107,4 +107,4 @@ You can customize queries and visualizations inside Grafana.
 ## Author
 
 **Sunil Yadav**  
-_Data Engineering Coursework Project - Phase 2 (Development & Reflection)_  
+_Data Engineering Coursework Project_  
